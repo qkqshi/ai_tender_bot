@@ -1,41 +1,28 @@
 import logging
 import os
-import asyncio
 from datetime import datetime, timezone
 from aiogram import Bot
 
 from db.database import save_tender, get_user_profile
 from services.parser import B2BParser
 from services.agent import FilterAgent
-from config import SEARCH_QUERIES, MAX_SEARCH_PAGES, ADMIN_ID, DEADLINE_MIN_HOURS, DEADLINE_MAX_HOURS
+from config import SEARCH_QUERIES, MAX_SEARCH_PAGES, ADMIN_ID
 
-# Множество для предотвращения повторной отправки одних и тех же лотов (в рамках жизни бота)
 notified_tenders = set()
+
 
 async def run_single_parsing_cycle(
     bot: Bot, db_pool, user_id_to_notify: int, keyword_mode: str = "profile",
 ) -> dict:
-    """
-    Выполняет один цикл поиска, фильтрации и рассылки.
-
-    Args:
-        keyword_mode:
-            "profile" (default) — поиск по keywords из профиля юзера;
-            "all" — поиск без слова, перебор всей ленты закупок (cap 50 страниц).
-            В режиме "all" фильтр keywords в agent.py отключается автоматически
-            (т.к. keywords=[] для разового вызова).
-
-    Возвращает {"sent_count": N, "warnings": [...]}.
-    """
+    """Выполняет поиск, фильтрацию и отправку результатов."""
     global notified_tenders
 
     proxy_url = os.getenv("B2B_PROXY_URL") or None
     if proxy_url:
-        logging.info(f"🌐 Используется прокси для B2B")
+        logging.info(f"Используется прокси для B2B")
     else:
-        logging.info("🔓 Прокси для B2B не используется")
+        logging.info("Прокси для B2B не используется")
 
-    # Получаем профиль или используем дефолтные настройки
     profile = await get_user_profile(db_pool, user_id_to_notify)
 
     if not profile:
@@ -44,17 +31,15 @@ async def run_single_parsing_cycle(
             'user_id': user_id_to_notify,
             'keywords': SEARCH_QUERIES,
             'max_pages': MAX_SEARCH_PAGES,
-            'max_hours_left': 168, # 7 дней по умолчанию
-            'max_participants': 5, # 5 участников по умолчанию
+            'max_hours_left': 168,
+            'max_participants': 5,
             'include_hidden_participants': True
         }
 
     if keyword_mode == "all":
-        # Разовый прогон по всей ленте: keywords пустые (parser идёт без f_keyword,
-        # agent пропускает фильтр по словам — см. services/agent.py:29).
         search_queries: list[str] = []
         max_pages = min(profile.get('max_pages') or MAX_SEARCH_PAGES, 50)
-        # Подменяем профиль для агента, оставив остальные фильтры на месте
+
         profile = {**profile, 'keywords': []}
     else:
         search_queries = profile.get('keywords') or SEARCH_QUERIES
@@ -69,31 +54,28 @@ async def run_single_parsing_cycle(
     )
     agent = FilterAgent(db_pool)
 
-    logging.info(f"🔄 Запуск поиска для пользователя {user_id_to_notify} (запросы: {search_queries})...")
+    logging.info(f"Запуск поиска для пользователя {user_id_to_notify} (запросы: {search_queries})...")
     try:
         tenders = await parser.fetch_tenders()
     except Exception as e:
-        logging.error(f"💥 Критическая ошибка парсинга: {e}")
+        logging.error(f"Критическая ошибка парсинга: {e}")
         tenders = []
 
     if not tenders:
-        logging.info("📭 Новых тендеров не найдено.")
+        logging.info("Новых тендеров не найдено.")
         return {"sent_count": 0, "total_found": 0, "total_matched": 0, "warnings": []}
 
-    # Сохраняем и фильтруем тендеры специально для этого пользователя
     notifications = []
     for tender in tenders:
         if db_pool:
             await save_tender(db_pool, tender)
-            
+
         is_match = await agent.evaluate_tender_for_user(tender, profile)
         if is_match:
             notifications.append((user_id_to_notify, tender))
-            
-    logging.info(f"📋 Найдено: {len(tenders)}, после фильтрации: {len(notifications)}")
 
-    # Промежуточный отчёт юзеру — чтобы видел сразу, сколько лотов всего попалось
-    # и сколько из них прошло его фильтры (до начала рассылки самих карточек).
+    logging.info(f"Найдено: {len(tenders)}, после фильтрации: {len(notifications)}")
+
     try:
         await bot.send_message(
             user_id_to_notify,
@@ -110,15 +92,6 @@ async def run_single_parsing_cycle(
         if uid != user_id_to_notify:
             continue
 
-        # Для РУЧНОГО поиска (run_single_parsing_cycle) мы НЕ пропускаем уже уведомленные тендеры,
-        # так как пользователь хочет видеть текущий срез результатов.
-        # if (uid, tender.id) in notified_tenders:
-        #     continue
-
-        # Формируем текст дедлайна для сообщения.
-        # SPA-тендеры (через API) дают ISO с таймзоной → aware,
-        # старые view.html — без → naive. Сравнивать с now нужно с одной стороны,
-        # иначе TypeError проглатывается except'ом и в TG нет дедлайна.
         deadline_line = ""
         if tender.deadline:
             try:
@@ -140,17 +113,16 @@ async def run_single_parsing_cycle(
                 if h_left <= 24:
                     deadline_line = f"🔥 {deadline_line}"
             except Exception as e:
-                logging.warning(f"⚠️ Не смог распарсить deadline тендера {tender.id} ({tender.deadline!r}): {e}")
+                logging.warning(f"Не смог распарсить deadline тендера {tender.id} ({tender.deadline!r}): {e}")
 
         if tender.nmcc == 0.0:
             price_line = "💰 НМЦК: ⚠️ Цена скрыта заказчиком"
         else:
             price_line = f"💰 НМЦК: {tender.nmcc:,.2f} ₽"
 
-        # Получаем профиль для отображения бейджа (опционально)
         profile = await get_user_profile(db_pool, uid)
         max_p = profile.get('max_participants', 2) if profile else 2
-        
+
         golden_badge = ""
         if 0 <= tender.participant_count <= max_p:
             golden_badge = f"🥇 ВАШ ЛОТ! (участников <= {max_p})\n"
@@ -175,7 +147,7 @@ async def run_single_parsing_cycle(
         try:
             await bot.send_message(uid, msg, parse_mode=None)
             notified_tenders.add((uid, tender.id))
-            logging.info(f"✅ Уведомление отправлено {uid} → тендер {tender.id}")
+            logging.info(f"Уведомление отправлено {uid} → тендер {tender.id}")
             sent_count += 1
         except Exception as e:
             logging.error(f"Failed to send message to {uid}: {e}")

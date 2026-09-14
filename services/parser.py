@@ -16,7 +16,6 @@ from tender_logic import extract_b2b_data
 
 logger = logging.getLogger(__name__)
 
-# Реалистичные заголовки — имитация обычного Chrome-браузера
 DEFAULT_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -42,13 +41,7 @@ SEARCH_BASE_URL = "https://www.b2b-center.ru/market/"
 
 
 class B2BParser:
-    """
-    Парсер тендеров B2B-Center.
-
-    Поиск идёт через httpx на /market/?f_keyword= (HTML выдача, токен не нужен — только куки).
-    Детали тендера берутся через API /market/openapi/trade/get_trade_aggregate
-    (B2BApiClient внутри тянет fresh access_token через Playwright-перехват OIDC).
-    """
+    """Ищет тендеры B2B-Center и загружает их данные."""
 
     def __init__(
         self,
@@ -87,27 +80,21 @@ class B2BParser:
 
     @staticmethod
     def _load_storage() -> dict:
-        """
-        Загружает дамп localStorage+sessionStorage из data/b2b_storage.json.
-        Нужен чтобы OIDC в Playwright мог пройти silent-signin — иначе /auth/openid/token/
-        возвращает 400 и токена не получить.
-        """
+        """Загружает localStorage и sessionStorage для OIDC."""
         path = os.path.join('data', 'b2b_storage.json')
         if not os.path.exists(path):
-            logger.warning(f"⚠️ {path} не найден — OIDC silent-signin может не пройти")
+            logger.warning(f"{path} не найден — OIDC silent-signin может не пройти")
             return {}
         try:
             with open(path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             ls_count = len(data.get('localStorage') or {})
             ss_count = len(data.get('sessionStorage') or {})
-            logger.info(f"🔑 Storage загружен: localStorage={ls_count} ключей, sessionStorage={ss_count}")
+            logger.info(f"Storage загружен: localStorage={ls_count} ключей, sessionStorage={ss_count}")
             return data
         except (OSError, json.JSONDecodeError) as e:
-            logger.error(f"❌ Ошибка чтения {path}: {e}")
+            logger.error(f"Ошибка чтения {path}: {e}")
             return {}
-
-    # ────────────────────── HTTP / captcha helpers ──────────────────────
 
     def _build_client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(
@@ -121,7 +108,7 @@ class B2BParser:
     def _is_captcha_page(self, html: str, url: str) -> bool:
         if '/captcha' in url.lower():
             return True
-        # login с error=login_required — это не капча, это отсутствие авторизации
+
         if 'error=login_required' in url.lower():
             return False
         markers = [
@@ -160,20 +147,20 @@ class B2BParser:
             task = {"type": "RecaptchaV2TaskProxyless", "websiteURL": website_url, "websiteKey": sitekey}
             service_name = "Anti-Captcha"
         else:
-            logger.error(f"❌ Неподдерживаемый тип капчи: {captcha_type}")
+            logger.error(f"Неподдерживаемый тип капчи: {captcha_type}")
             return None
 
         if not api_key:
-            logger.error(f"❌ API-ключ для {service_name} не задан в .env")
+            logger.error(f"API-ключ для {service_name} не задан в .env")
             return None
 
-        logger.info(f"🧩 Решаем капчу через {service_name} ({captcha_type}), sitekey={sitekey[:20]}...")
+        logger.info(f"Решаем капчу через {service_name} ({captcha_type}), sitekey={sitekey[:20]}...")
         try:
             async with httpx.AsyncClient(timeout=180.0) as ac:
                 resp = await ac.post(f"{api_url}/createTask", json={"clientKey": api_key, "task": task})
                 data = resp.json()
                 if data.get("errorId") != 0:
-                    logger.error(f"❌ {service_name} create: {data.get('errorDescription')}")
+                    logger.error(f"{service_name} create: {data.get('errorDescription')}")
                     return None
                 task_id = data["taskId"]
 
@@ -184,16 +171,16 @@ class B2BParser:
                     if rd.get("status") == "ready":
                         token = rd.get("solution", {}).get("token")
                         if token:
-                            logger.info(f"✅ Капча решена через {service_name}")
+                            logger.info(f"Капча решена через {service_name}")
                             return token
                         return None
                     if rd.get("errorId") != 0:
-                        logger.error(f"❌ {service_name}: {rd.get('errorDescription')}")
+                        logger.error(f"{service_name}: {rd.get('errorDescription')}")
                         return None
-                logger.error(f"⏱ Таймаут решения капчи через {service_name}")
+                logger.error(f"Таймаут решения капчи через {service_name}")
                 return None
         except Exception as e:
-            logger.error(f"💥 Ошибка {service_name}: {e}")
+            logger.error(f"Ошибка {service_name}: {e}")
             return None
 
     async def _submit_captcha_solution(
@@ -219,14 +206,14 @@ class B2BParser:
                 if '/captcha' not in str(resp.url).lower():
                     return True
             except Exception as e:
-                logger.warning(f"⚠️ POST form: {e}")
+                logger.warning(f"POST form: {e}")
 
         try:
             resp = await client.post(captcha_url, data=hidden)
             if '/captcha' not in str(resp.url).lower():
                 return True
         except Exception as e:
-            logger.warning(f"⚠️ POST captcha URL: {e}")
+            logger.warning(f"POST captcha URL: {e}")
 
         try:
             sep = "&" if "?" in original_url else "?"
@@ -234,7 +221,7 @@ class B2BParser:
             if '/captcha' not in str(resp.url).lower() and resp.status_code == 200:
                 return True
         except Exception as e:
-            logger.warning(f"⚠️ GET smart-token: {e}")
+            logger.warning(f"GET smart-token: {e}")
 
         return False
 
@@ -246,7 +233,7 @@ class B2BParser:
                 logger.error(f"Не удалось отправить алерт админу: {e}")
 
     async def _get_search_html(self, client: httpx.AsyncClient, url: str) -> Optional[str]:
-        """Скачивает HTML страницы поиска. При капче — решает, при 403/429 — алерт."""
+        """Загружает HTML страницы поиска."""
         try:
             response = await client.get(url)
             html = response.text
@@ -260,7 +247,7 @@ class B2BParser:
                 return None
 
             if self._is_captcha_page(html, final_url):
-                logger.warning(f"🤖 Капча на поиске: {final_url}")
+                logger.warning(f"Капча на поиске: {final_url}")
                 info = self._detect_captcha_info(html)
                 if info['type'] and info['sitekey']:
                     token = await self._request_captcha_solution(info['type'], final_url, info['sitekey'])
@@ -275,45 +262,43 @@ class B2BParser:
                 return None
 
             if response.status_code != 200:
-                logger.error(f"❌ HTTP {response.status_code}: {url}")
+                logger.error(f"HTTP {response.status_code}: {url}")
                 return None
 
             if "войти" in html.lower() and "личный кабинет" not in html.lower():
-                logger.warning("⚠️ Сессия гостя — проверь B2B_COOKIE")
+                logger.warning("Сессия гостя — проверь B2B_COOKIE")
 
-            # ServicePipe JS-challenge (1.7-1.8кб stub) — пробиваем через Playwright,
-            # cookies протекут в httpx-клиент и следующие страницы пойдут без challenge
             if self._is_servicepipe_challenge(html):
-                logger.warning(f"🛡️ ServicePipe challenge на странице ({len(html)} байт), пробиваем через Playwright: {url}")
+                logger.warning(f"ServicePipe challenge на странице ({len(html)} байт), пробиваем через Playwright: {url}")
                 try:
                     fresh_html = await self.api.fetch_html_via_playwright(url)
                 except Exception as e:
-                    logger.error(f"💥 Playwright fallback упал на {url}: {e}")
+                    logger.error(f"Playwright fallback упал на {url}: {e}")
                     return None
                 if not fresh_html:
-                    logger.warning(f"⚠️ Playwright не вернул HTML после SP-challenge: {url}")
+                    logger.warning(f"Playwright не вернул HTML после SP-challenge: {url}")
                     return None
-                # Подтягиваем свежие куки (spsn/spid и пр.) в httpx-клиент
+
                 for k, v in self.api.cookies.items():
                     client.cookies.set(k, v, domain=".b2b-center.ru")
                     self.cookies[k] = v
-                logger.info(f"✅ SP-challenge пробит, html len={len(fresh_html)}")
+                logger.info(f"SP-challenge пробит, html len={len(fresh_html)}")
                 return fresh_html
 
             return html
         except httpx.TimeoutException:
-            logger.error(f"⏱ Таймаут: {url}")
+            logger.error(f"Таймаут: {url}")
             return None
         except httpx.ConnectError as e:
-            logger.error(f"🔌 Ошибка подключения: {e}")
+            logger.error(f"Ошибка подключения: {e}")
             return None
         except Exception as e:
-            logger.error(f"💥 Ошибка загрузки {url}: {e}")
+            logger.error(f"Ошибка загрузки {url}: {e}")
             return None
 
     @staticmethod
     def _is_servicepipe_challenge(html: str) -> bool:
-        """Короткая заглушка (~1.7кб) с ServicePipe JS-challenge вместо контента."""
+        """Проверяет ответ на наличие ServicePipe challenge."""
         if not html or len(html) > 5000:
             return False
         low = html.lower()
@@ -322,45 +307,32 @@ class B2BParser:
     async def _fetch_old_html(
         self, client: httpx.AsyncClient, tid: str, url: str,
     ) -> Optional[dict]:
-        """
-        Тянет HTML старого тендера (view.html?id=NNN) через тот же httpx-клиент
-        (с куками и anti-captcha), парсит tender_logic.extract_b2b_data.
-
-        Если словили ServicePipe JS-challenge — поднимаем Playwright, он
-        выполнит challenge, получит spsn-куки, вернёт реальную страницу.
-        После такого прохода обновлённые куки попадут в self.cookies,
-        следующие httpx-запросы пройдут без challenge.
-
-        Возвращает dict в том же формате, что и B2BApiClient.get_tender.
-        """
+        """Загружает и разбирает страницу тендера старого формата."""
         try:
             html = await self._get_search_html(client, url)
         except Exception as e:
-            logger.error(f"💥 Ошибка загрузки HTML старого тендера {tid}: {e}")
+            logger.error(f"Ошибка загрузки HTML старого тендера {tid}: {e}")
             return None
         if not html:
             return None
 
         if self._is_servicepipe_challenge(html):
-            logger.info(f"🛡️ ServicePipe challenge для {tid}, пробиваем через Playwright")
+            logger.info(f"ServicePipe challenge для {tid}, пробиваем через Playwright")
             try:
                 html = await self.api.fetch_html_via_playwright(url)
             except Exception as e:
-                logger.error(f"💥 Playwright для {tid} упал: {e}")
+                logger.error(f"Playwright для {tid} упал: {e}")
                 return None
             if not html:
-                logger.warning(f"⚠️ Playwright не вернул HTML для {tid}")
+                logger.warning(f"Playwright не вернул HTML для {tid}")
                 return None
-            # Мёрджим свежие куки (fetch_html_via_playwright уже обновил self.api.cookies,
-            # но httpx-клиент в parser.py держит свою копию — подтянем её)
+
             for k, v in self.api.cookies.items():
                 client.cookies.set(k, v, domain=".b2b-center.ru")
                 self.cookies[k] = v
 
         data = extract_b2b_data(html, url)
         if not data:
-            # Разбираемся, почему парсер вернул None — чаще всего куки протухли
-            # и сервер отдал версию "для гостя" без h1/дедлайна.
             low = html.lower()
             is_guest = 'войти' in low and 'личный кабинет' not in low
             has_h1 = '<h1' in low
@@ -373,7 +345,7 @@ class B2BParser:
             if not has_title:
                 reason.append('нет title')
             logger.warning(
-                f"⚠️ extract_b2b_data=None для старого тендера {tid}: "
+                f"extract_b2b_data=None для старого тендера {tid}: "
                 f"{', '.join(reason) or 'неизвестная причина'} (len={len(html)})"
             )
             try:
@@ -383,7 +355,6 @@ class B2BParser:
                 pass
             return None
 
-        # Нормализуем ключи под формат B2BApiClient
         return {
             "id": str(data.get("id") or tid),
             "title": data.get("title") or "Без названия",
@@ -393,32 +364,22 @@ class B2BParser:
             "url": data.get("url") or url,
         }
 
-    # ────────────────────── Main flow ──────────────────────
-
     @staticmethod
     def _extract_tender_id(url: str) -> Optional[str]:
-        """Из URL вида .../tender-NNNNN/ или .../view.html?id=NNN достаёт id."""
+        """Извлекает идентификатор тендера из URL."""
         m = re.search(r'/tender-(\d+)', url) or re.search(r'[?&]id=(\d+)', url)
         return m.group(1) if m else None
 
     async def fetch_tenders(self) -> List[TenderBase]:
-        """
-        Ищет и парсит тендеры: поиск через httpx, детали через API.
-
-        Режим "без ключевого слова": если self.search_queries пуст — делаем один
-        проход по главной маркета (без f_keyword). Лимит страниц cap-аем 50,
-        иначе можно случайно засосать пол-маркета.
-        """
+        """Ищет и возвращает тендеры по текущим настройкам."""
         tenders: list[TenderBase] = []
         seen_ids: set[str] = set()
-        total_found = 0       # сумма ссылок со всех страниц (с дублями)
-        total_unique = 0      # уникальные tid (после дедупликации)
-        total_dups = 0        # дубли между страницами
-        total_parsed = 0      # успешно вытянутые
-        total_failed = 0      # info=None после fetch_old/api.get_tender
+        total_found = 0
+        total_unique = 0
+        total_dups = 0
+        total_parsed = 0
+        total_failed = 0
 
-        # Режим "без слова": ставим один служебный пустой запрос, в URL ниже
-        # не подставим f_keyword, перебираем всю ленту.
         no_keyword_mode = not self.search_queries
         queries = self.search_queries if not no_keyword_mode else [""]
         effective_cap = min(self.max_pages, 50) if no_keyword_mode else self.max_pages
@@ -435,7 +396,6 @@ class B2BParser:
 
                         from_offset = (page - 1) * 20
                         if no_keyword_mode:
-                            # Перебор всей ленты закупок — без f_keyword
                             search_url = (
                                 f"{SEARCH_BASE_URL}?searching=1&trade=buy&from={from_offset}"
                             )
@@ -449,7 +409,7 @@ class B2BParser:
                             await asyncio.sleep(random.uniform(2.0, 4.0))
 
                         log_label = query if query else "(вся лента)"
-                        logger.info(f"🔍 Поиск '{log_label}' (стр. {page})")
+                        logger.info(f"Поиск '{log_label}' (стр. {page})")
                         html = await self._get_search_html(client, search_url)
                         if not html:
                             reason = (
@@ -460,11 +420,6 @@ class B2BParser:
                             logger.warning(reason)
                             break
 
-                        # На первой странице считаем общее кол-во страниц.
-                        # В no_keyword_mode этот авто-cap отключаем: счётчик
-                        # «Актуально • N» на главной маркета не отражает всю
-                        # ленту — он показывает срез, и обрезка по нему
-                        # необоснованно укорачивает поиск.
                         if page == 1 and not no_keyword_mode:
                             total_count_match = (
                                 re.search(r'Актуально\s*•\s*([\d\s]+)', html)
@@ -477,7 +432,7 @@ class B2BParser:
                                     )
                                     total_pages_available = math.ceil(total_items / 20)
                                     logger.info(
-                                        f"📑 Маркер на стр.1: всего {total_items} лотов "
+                                        f"Маркер на стр.1: всего {total_items} лотов "
                                         f"≈ {total_pages_available} стр. (запрошено {self.max_pages})"
                                     )
                                     if self.max_pages > total_pages_available:
@@ -487,12 +442,11 @@ class B2BParser:
                                             f"буду искать {total_pages_available} стр."
                                         )
                                         self.pagination_warnings.append(warning)
-                                        logger.info(f"📑 {warning}")
+                                        logger.info(f"{warning}")
                                         effective_max_pages = total_pages_available
                                 except Exception as e:
                                     logger.error(f"Ошибка парсинга общего количества страниц: {e}")
 
-                        # Извлекаем id тендеров со страницы поиска
                         ids_with_urls: list[tuple[str, str]] = []
                         for m in re.finditer(r'href=["\']([^"\']*?/tender-(\d+)/[^"\']*?)["\']', html):
                             tid = m.group(2)
@@ -518,18 +472,15 @@ class B2BParser:
                                 fn = f"empty_search_{page}.html"
                                 with open(fn, "w", encoding="utf-8") as f:
                                     f.write(html)
-                                logger.info(f"💾 HTML страницы сохранён в {fn} для разбора")
+                                logger.info(f"HTML страницы сохранён в {fn} для разбора")
                             except OSError:
                                 pass
                             break
 
-                        # Считаем уникальные/дубли на этой странице — для честной статистики.
-                        # B2B-Center часто показывает одни и те же топ-лоты на разных страницах,
-                        # из-за этого total_found с дублями давал ложно низкий процент.
                         page_unique = sum(1 for tid, _ in ids_with_urls if tid not in seen_ids)
                         page_dups = len(ids_with_urls) - page_unique
                         logger.info(
-                            f"📄 Стр. {page}: {len(ids_with_urls)} ссылок "
+                            f"Стр. {page}: {len(ids_with_urls)} ссылок "
                             f"(уник: {page_unique}, дублей с пред. стр.: {page_dups})"
                         )
                         total_found += len(ids_with_urls)
@@ -538,28 +489,20 @@ class B2BParser:
 
                         for tid, url in ids_with_urls:
                             if tid in seen_ids:
-                                logger.debug(f"⏭️ Дубль {tid} (уже видели на пред. стр.) — скип")
+                                logger.debug(f"Дубль {tid} (уже видели на пред. стр.) — скип")
                                 continue
 
                             await asyncio.sleep(random.uniform(1.5, 3.5))
 
-                            # Старый дизайн (view.html?id=NNN) идёт через HTML-парсинг:
-                            # — SPA на таком URL не рендерится, OIDC-токен не получить;
-                            # — API get_trade_aggregate для этих тендеров возвращает
-                            #   participants_count=0 без флага hide_participants_count,
-                            #   т.е. по ответу не отличить "нет участников" от "скрыты".
-                            # HTML же содержит маркер "Всего заявок: Скрыто".
                             is_old_design = 'view.html?id=' in url
                             if is_old_design:
                                 info = await self._fetch_old_html(client, tid, url)
                             else:
-                                # Новый дизайн: передаём URL со slug-ом — SPA рендерится и
-                                # Playwright перехватывает /auth/openid/token/, API отдаёт данные.
                                 info = await self.api.get_tender(tid, tender_url=url)
                             if not info:
-                                logger.warning(f"⚠️ Не удалось получить тендер {tid}")
+                                logger.warning(f"Не удалось получить тендер {tid}")
                                 total_failed += 1
-                                # Кладём в seen_ids чтобы не ретраить тот же tid на следующих страницах
+
                                 seen_ids.add(tid)
                                 continue
 
@@ -580,18 +523,16 @@ class B2BParser:
                                 raw_json=info,
                             ))
                             logger.info(
-                                f"✅ Tender {final_id}: {info.get('title', '')[:40]}... | "
+                                f"Tender {final_id}: {info.get('title', '')[:40]}... | "
                                 f"deadline={info.get('deadline')}"
                             )
                             total_parsed += 1
         finally:
             await self.api.close()
 
-        # Считаем процент от уникальных, а не от суммарных дублей —
-        # это реальная success rate парсинга
         pct_uniq = (total_parsed * 100 // total_unique) if total_unique > 0 else 0
         logger.info(
-            f"📊 Статистика: всего ссылок {total_found} "
+            f"Статистика: всего ссылок {total_found} "
             f"(уник: {total_unique}, дублей между стр.: {total_dups}); "
             f"распарсено {total_parsed}, ошибок {total_failed} "
             f"({pct_uniq}% от уникальных)"

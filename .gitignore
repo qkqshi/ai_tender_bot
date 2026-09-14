@@ -42,7 +42,7 @@ test-results/
 # Local editor and OS files
 .idea/
 .vscode/
-.claude/settings.local.json
+*.local.json
 .DS_Store
 Thumbs.db
 Desktop.ini

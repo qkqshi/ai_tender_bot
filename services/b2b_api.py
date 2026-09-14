@@ -1,19 +1,7 @@
-"""
-B2B-Center API клиент.
-
-Логика:
-1. Получаем fresh access_token через Playwright (перехват OIDC /auth/openid/token/).
-2. Дергаем /market/openapi/trade/get_trade_aggregate через httpx с Bearer.
-3. Парсим EAV-структуру ответа → {id, title, deadline, participants_count, nmcc, url}.
-
-Старый путь (Playwright рендер SPA-страниц) в parser.py не работает из-за анти-бот
-защиты B2B — серверу возвращается капча при детекте Playwright. API подход обходит
-это, потому что token уже получен до анти-бот чека, а дальше идут чистые httpx-запросы.
-"""
+"""Клиент API B2B-Center."""
 import asyncio
 import json
 import logging
-import os
 import re
 import time
 from typing import Any, Optional, Tuple
@@ -30,7 +18,6 @@ UA = (
 
 API_ENDPOINT = "https://www.b2b-center.ru/market/openapi/trade/get_trade_aggregate"
 
-# Запрашиваем все разделы данных тендера (trade + стадии + счётчики)
 TRADE_AGGREGATE_FIELDS = [
     {"field_name": "trade"},
     {"field_name": "current_stage"},
@@ -63,16 +50,8 @@ def _find_eav_by_sys_name(eav_list: list, sys_name: str) -> Optional[dict]:
 
 
 class B2BApiClient:
-    """
-    Клиент к API B2B-Center. Хранит в памяти access_token до истечения.
+    """Получает и преобразует данные тендеров B2B-Center."""
 
-    Использование:
-        client = B2BApiClient(cookies={...}, storage={...}, proxy_url=None)
-        data = await client.get_tender(4424216)  # dict или None
-        await client.close()
-    """
-
-    # Буфер перед истечением токена — обновляем заранее
     TOKEN_REFRESH_BUFFER_SEC = 60
 
     def __init__(
@@ -90,10 +69,8 @@ class B2BApiClient:
         self._token_lock = asyncio.Lock()
 
     async def close(self):
-        """Сейчас клиент ничего постоянного не держит, но оставлю хук для будущих расширений."""
+        """Поддерживает общий интерфейс клиентов."""
         pass
-
-    # ─────────────────────────────── Token ───────────────────────────────
 
     def _is_token_valid(self) -> bool:
         return bool(self._token) and (time.time() < self._token_expires_at - self.TOKEN_REFRESH_BUFFER_SEC)
@@ -104,28 +81,25 @@ class B2BApiClient:
             if self._is_token_valid():
                 return self._token
 
-            logger.info("🔑 Получаем fresh access_token через Playwright...")
+            logger.info("Получаем fresh access_token через Playwright...")
             token, expires_in, updated_cookies = await self._fetch_fresh_token(trigger_url)
             if not token:
-                logger.error("❌ Не удалось получить access_token")
+                logger.error("Не удалось получить access_token")
                 return None
 
             self._token = token
             self._token_expires_at = time.time() + (expires_in or 300)
-            # Обновляем куки — OIDC flow мог добавить/обновить сессионные
+
             if updated_cookies:
                 self.cookies.update(updated_cookies)
             logger.info(
-                f"✅ Token получен (len={len(token)}, expires_in={expires_in}s, "
+                f"Token получен (len={len(token)}, expires_in={expires_in}s, "
                 f"куки обновлены: {len(updated_cookies) if updated_cookies else 0})"
             )
             return self._token
 
     async def _fetch_fresh_token(self, trigger_url: str) -> Tuple[Optional[str], Optional[int], dict]:
-        """
-        Поднимает Playwright, открывает страницу тендера, перехватывает
-        OIDC /auth/openid/token/ response и возвращает access_token.
-        """
+        """Получает OIDC-токен через браузерную сессию."""
         async with async_playwright() as pw:
             launch_opts = {
                 "headless": True,
@@ -173,19 +147,11 @@ class B2BApiClient:
                 token_holder: dict = {"token": None, "expires_in": None}
                 token_event = asyncio.Event()
 
-                # Все network-запросы во время попытки перехвата —
-                # на случай таймаута сольём в файл для отладки
                 seen_requests: list[dict] = []
                 console_logs: list[str] = []
 
                 def _on_request(req):
-                    """
-                    Перехватываем Authorization: Bearer из исходящих API-запросов.
-                    На некоторых тендерах OIDC идёт через silent redirect
-                    (/auth/openid/authorize?prompt=none) без отдельного /token/-эндпоинта,
-                    поэтому ловить токен из response /token/ — недостаточно.
-                    Bearer-токен мы найдём в заголовках любого /market/openapi/ запроса.
-                    """
+                    """Перехватывает Bearer-токен из запросов страницы."""
                     if token_holder["token"]:
                         return
                     try:
@@ -196,10 +162,10 @@ class B2BApiClient:
                                 tok = auth.split(" ", 1)[1].strip()
                                 if tok:
                                     token_holder["token"] = tok
-                                    # expires_in из request не достать — поставим дефолт 300
+
                                     token_holder["expires_in"] = token_holder.get("expires_in") or 300
                                     token_event.set()
-                                    logger.info(f"🎯 Token снят из Authorization-заголовка {req.url[:100]}")
+                                    logger.info(f"Token снят из Authorization-заголовка {req.url[:100]}")
                     except Exception as e:
                         logger.warning(f"on_request hook error: {e}")
 
@@ -213,9 +179,8 @@ class B2BApiClient:
                     except Exception:
                         pass
 
-                    # Логируем всё подозрительное на auth — даже не сработавшее
                     if any(s in ul for s in ("/auth/", "/openid/", "token", "oauth")):
-                        logger.info(f"🔎 auth-resp: {resp.status} {u[:160]}")
+                        logger.info(f"auth-resp: {resp.status} {u[:160]}")
 
                     if "/auth/openid/token/" in ul and resp.status == 200:
                         try:
@@ -233,19 +198,19 @@ class B2BApiClient:
                 page.on("response", _on_resp)
                 page.on("console", lambda msg: console_logs.append(f"[{msg.type}] {msg.text[:300]}"))
 
-                logger.info(f"🌐 trigger_url: {trigger_url}")
+                logger.info(f"trigger_url: {trigger_url}")
 
                 try:
                     await page.goto(trigger_url, wait_until="domcontentloaded", timeout=45000)
-                    logger.info(f"📍 final_url после goto: {page.url}")
+                    logger.info(f"final_url после goto: {page.url}")
                 except Exception as e:
                     logger.warning(f"goto warning: {e}")
 
                 try:
                     await asyncio.wait_for(token_event.wait(), timeout=30.0)
                 except asyncio.TimeoutError:
-                    logger.warning("⚠️ Токен не перехвачен за 30 сек — возможно, storage/cookies протухли")
-                    # Дамп для отладки: какой URL итоговый, что грузилось, что было в консоли
+                    logger.warning("Токен не перехвачен за 30 сек — возможно, storage/cookies протухли")
+
                     try:
                         tid_match = re.search(r"tender-(\d+)|[?&]id=(\d+)", trigger_url)
                         tid = (tid_match.group(1) or tid_match.group(2)) if tid_match else "unknown"
@@ -267,13 +232,13 @@ class B2BApiClient:
                             f.write(f"\n===== Page HTML (len={len(page_html)}) =====\n")
                             f.write(page_html[:50000])
                         logger.info(
-                            f"💾 Дамп для отладки токена: {debug_path} "
+                            f"Дамп для отладки токена: {debug_path} "
                             f"(requests={len(seen_requests)}, console={len(console_logs)}, "
                             f"html_len={len(page_html)})"
                         )
                         try:
                             await page.screenshot(path=f"token_debug_{tid}.png", full_page=True)
-                            logger.info(f"📸 Скриншот: token_debug_{tid}.png")
+                            logger.info(f"Скриншот: token_debug_{tid}.png")
                         except Exception as e:
                             logger.warning(f"Не смог снять скриншот: {e}")
                     except Exception as e:
@@ -287,14 +252,7 @@ class B2BApiClient:
                 await browser.close()
 
     async def fetch_html_via_playwright(self, url: str, timeout_ms: int = 30000) -> Optional[str]:
-        """
-        Качает HTML страницы через Playwright.
-
-        Нужно для обхода ServicePipe JS-challenge (когда httpx ловит заглушку
-        на 1.7кб вместо страницы): браузер выполняет challenge, получает spsn-куку,
-        делает редирект на реальную страницу. Обновлённые куки после прохода
-        мёрджим в self.cookies — следующие httpx-запросы уже не получат challenge.
-        """
+        """Загружает HTML через Playwright и обновляет cookies."""
         async with async_playwright() as pw:
             launch_opts = {
                 "headless": True,
@@ -324,14 +282,13 @@ class B2BApiClient:
                 page = await context.new_page()
                 try:
                     await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
-                    # Ждём пока ServicePipe redirect-challenge отработает
+
                     await page.wait_for_load_state("networkidle", timeout=timeout_ms)
                 except Exception as e:
-                    logger.warning(f"⚠️ Playwright goto warning для {url}: {e}")
+                    logger.warning(f"Playwright goto warning для {url}: {e}")
 
                 html = await page.content()
 
-                # Забираем свежие куки (spsn от ServicePipe + всё, что обновилось)
                 all_cookies = await context.cookies()
                 fresh = {c["name"]: c["value"] for c in all_cookies}
                 if fresh:
@@ -340,22 +297,8 @@ class B2BApiClient:
             finally:
                 await browser.close()
 
-    # ─────────────────────────────── API call ───────────────────────────────
-
     async def get_tender(self, tender_id: int | str, tender_url: Optional[str] = None) -> Optional[dict]:
-        """
-        Получает полные данные тендера через API и извлекает нужные поля.
-
-        Args:
-            tender_id: id тендера.
-            tender_url: полный URL тендера из поисковой выдачи (обязательно со slug-ом
-                категории, иначе SPA отдаёт 404 и OIDC не доводит обмен до конца).
-                Если не передан, используем fallback `/app/market/tender-{id}/` — но
-                Playwright может не получить токен.
-
-        Возвращает dict {id, title, nmcc, participants_count, deadline, url}
-        или None при ошибке.
-        """
+        """Возвращает данные тендера или None при ошибке."""
         tender_id = int(tender_id)
         if not tender_url:
             tender_url = f"https://www.b2b-center.ru/app/market/tender-{tender_id}/"
@@ -378,14 +321,13 @@ class B2BApiClient:
             "filter": {"fields": TRADE_AGGREGATE_FIELDS},
         }
 
-        # Один ретрай на транзиентные сетевые ошибки (ВПН моргнул, DNS и т.п.)
         last_err: Optional[Exception] = None
         for attempt in (1, 2):
             try:
                 async with httpx.AsyncClient(timeout=30.0, cookies=self.cookies, proxy=self.proxy_url) as client:
                     resp = await client.post(API_ENDPOINT, headers=headers, json=body)
                     if resp.status_code == 401:
-                        logger.warning("⚠️ 401 от API — сбрасываем токен и пробуем повторно")
+                        logger.warning("401 от API — сбрасываем токен и пробуем повторно")
                         self._token = None
                         self._token_expires_at = 0.0
                         token = await self._get_token(tender_url)
@@ -395,7 +337,7 @@ class B2BApiClient:
                         resp = await client.post(API_ENDPOINT, headers=headers, json=body)
 
                     if resp.status_code != 200:
-                        logger.error(f"❌ API {resp.status_code} для тендера {tender_id}: {resp.text[:300]}")
+                        logger.error(f"API {resp.status_code} для тендера {tender_id}: {resp.text[:300]}")
                         return None
 
                     data = resp.json()
@@ -403,32 +345,20 @@ class B2BApiClient:
             except (httpx.ConnectError, httpx.TimeoutException, httpx.ReadError) as e:
                 last_err = e
                 if attempt == 1:
-                    logger.warning(f"⚠️ Сетевая ошибка для {tender_id} ({e}), ретрай через 2 сек")
+                    logger.warning(f"Сетевая ошибка для {tender_id} ({e}), ретрай через 2 сек")
                     await asyncio.sleep(2.0)
                     continue
-                logger.error(f"💥 Сетевая ошибка для тендера {tender_id} после ретрая: {e}")
+                logger.error(f"Сетевая ошибка для тендера {tender_id} после ретрая: {e}")
                 return None
             except Exception as e:
-                logger.error(f"💥 Ошибка API для тендера {tender_id}: {e}")
+                logger.error(f"Ошибка API для тендера {tender_id}: {e}")
             return None
 
         return self.extract_tender(data, tender_url)
 
-    # ─────────────────────────────── Extraction ───────────────────────────────
-
     @staticmethod
     def extract_tender(api_response: dict, tender_url: str) -> Optional[dict]:
-        """
-        Вытаскивает поля из EAV-ответа get_trade_aggregate.
-
-        Ключевые пути:
-          trade.id.value                                                           → id
-          trade.fields_values.fields_values[sys_name=subject].string_value         → title
-          trade.fields_values.fields_values[sys_name=offers_stage_date_end].date_time → deadline
-          trade_participants_count                                                 → participants_count
-
-        При отсутствии deadline возвращает None (парсер без дедлайна бесполезен).
-        """
+        """Преобразует EAV-ответ API в данные тендера."""
         ta = api_response.get("trade_aggregate") or api_response
         if not isinstance(ta, dict):
             return None
@@ -436,66 +366,48 @@ class B2BApiClient:
         trade = ta.get("trade") or {}
         trade_fv = ((trade.get("fields_values") or {}).get("fields_values")) or []
 
-        # ID
         tid_obj = trade.get("id")
         if isinstance(tid_obj, dict):
             tender_id = tid_obj.get("value")
         else:
             tender_id = tid_obj
         if tender_id is None:
-            # Фолбэк: из settings_values.trade_number
             sv = ((trade.get("settings_values") or {}).get("fields_values")) or []
             tn = _find_eav_by_sys_name(sv, "trade_number")
             if tn:
                 tender_id = _get_eav_value(tn)
         if tender_id is None:
-            logger.warning("⚠️ extract: не нашёл trade.id")
+            logger.warning("extract: не нашёл trade.id")
             return None
 
-        # Title — sys_name=subject
         subj = _find_eav_by_sys_name(trade_fv, "subject")
         title = _get_eav_value(subj) if subj else None
         if not title:
-            logger.warning(f"⚠️ extract: тендер {tender_id} без subject")
+            logger.warning(f"extract: тендер {tender_id} без subject")
             title = "Без названия"
 
-        # Deadline — sys_name=offers_stage_date_end (ISO c таймзоной)
         deadline = None
         de = _find_eav_by_sys_name(trade_fv, "offers_stage_date_end")
         if de:
             deadline = _get_eav_value(de)
         if not deadline:
-            # Фолбэк: current_stage.fields_values[sys_name=date_end]
             cs = ta.get("current_stage") or {}
             cs_fv = ((cs.get("fields_values") or {}).get("fields_values")) or []
             de2 = _find_eav_by_sys_name(cs_fv, "date_end")
             if de2:
                 deadline = _get_eav_value(de2)
         if not deadline:
-            # Ещё один фолбэк: settings_values.main_stage_date_end
             sv = ((trade.get("settings_values") or {}).get("fields_values")) or []
             de3 = _find_eav_by_sys_name(sv, "main_stage_date_end")
             if de3:
                 deadline = _get_eav_value(de3)
 
         if not deadline:
-            logger.warning(f"⚠️ extract: тендер {tender_id} без deadline — пропускаем")
+            logger.warning(f"extract: тендер {tender_id} без deadline — пропускаем")
             return None
 
-        # Нормализуем deadline к isoformat (tender_logic ожидает)
-        # Пример вход: '2026-04-29T12:57:59+03:00' — уже isoformat, просто оставляем
         deadline_str = str(deadline)
 
-        # Participants
-        # Соглашение: -1 = скрыто (agent.py/runner.py проверяют == -1).
-        #
-        # Источники:
-        #   fields_values[sys_name=hide_participants_count].bool_value  — флаг "заказчик скрыл"
-        #   settings_values[sys_name=participants_count].int_value      — реальное число
-        #   ta.trade_participants_count                                 — фолбэк, часто 0
-        #
-        # Если hide=True → возвращаем -1 (юзер увидит "⚠️ Скрыты", fields фильтр проверит
-        # include_hidden_participants). Иначе — берём реальное число.
         sv = ((trade.get("settings_values") or {}).get("fields_values")) or []
 
         hide_p_field = _find_eav_by_sys_name(trade_fv, "hide_participants_count")
@@ -517,7 +429,6 @@ class B2BApiClient:
                 except (TypeError, ValueError):
                     participants_count = 0
 
-        # NMCC — в ответе обычно скрыто (hide_prices=True), оставляем 0.0
         nmcc = 0.0
 
         return {
