@@ -1,0 +1,31 @@
+{
+    "tenders": [
+        {
+            "id": "T001",
+            "title": "Поставка офисной бумаги",
+            "nmcc": 150000.0,
+            "participant_count": 0,
+            "is_online": true,
+            "url": "https://zakupki.gov.ru/...",
+            "raw_json": {"description": "Бумага А4 500 листов"}
+        },
+        {
+            "id": "T002",
+            "title": "Ремонт помещения",
+            "nmcc": 2000000.0,
+            "participant_count": 1,
+            "is_online": false,
+            "url": "https://zakupki.gov.ru/...",
+            "raw_json": {"description": "Капитальный ремонт актового зала"}
+        },
+        {
+            "id": "T003",
+            "title": "Закупка компьютеров",
+            "nmcc": 800000.0,
+            "participant_count": 2,
+            "is_online": true,
+            "url": "https://zakupki.gov.ru/...",
+            "raw_json": {"description": "Моноблоки 10 шт"}
+        }
+    ]
+}
