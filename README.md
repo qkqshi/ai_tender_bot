@@ -22,8 +22,8 @@ Telegram-бот для поиска закупок на B2B-Center, фильтр
 ## Быстрый старт
 
 ```bash
-git clone <URL-РЕПОЗИТОРИЯ>
-cd ai_tender_agent
+git clone https://github.com/qkqshi/ai_tender_bot.git
+cd ai_tender_bot
 
 python -m venv .venv
 ```
